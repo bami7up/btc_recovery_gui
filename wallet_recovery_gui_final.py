@@ -38,6 +38,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 import venv as venv_mod
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -311,10 +312,13 @@ class App(tk.Tk):
         self._current_scenario = "—"
         self._last_speed = "—"
         self._last_checked_password = "—"
+        self._autosave_job = None
 
         self._build_ui()
         self._sync_btr_path()
         self._load_data()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_autosave()
         self.after(300, self._check_venv)
 
     # ── Общий UI ──────────────────────────────────────────────────────────────
@@ -370,6 +374,18 @@ class App(tk.Tk):
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20)
         self._style()
+
+        quick_guide = tk.Label(
+            self,
+            text="Быстрый порядок: 1) Данные → 2) Генерация → 3) btcrecover → 4) Hashcat (опционально) → 5) Баланс.",
+            bg=BG2,
+            fg=TEXT,
+            font=FONT_SMALL,
+            anchor="w",
+            padx=10,
+            pady=6,
+        )
+        quick_guide.pack(fill="x", padx=20, pady=(8, 4))
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True, padx=20, pady=12)
@@ -756,6 +772,9 @@ class App(tk.Tk):
         self.btn_extract_hash = self._btn(button_row, "🧬 Извлечь hash", self._extract_wallet_hash, ACCENT, big=True)
         self.btn_extract_hash.pack(side="left")
 
+        self._btn(button_row, "⬇ Автоскачать Hashcat", self._download_hashcat, BLUE).pack(side="left", padx=(10, 0))
+        self._btn(button_row, "⬇ Автоскачать bitcoin2john", self._download_bitcoin2john, PURPLE).pack(side="left", padx=(8, 0))
+
         self.btn_run_hashcat = self._btn(button_row, "⚡ Запустить Hashcat", self._start_hashcat, GREEN, big=True)
         self.btn_run_hashcat.pack(side="left", padx=10)
 
@@ -837,6 +856,7 @@ class App(tk.Tk):
         button_row = tk.Frame(address_frame, bg=BG2)
         button_row.pack(fill="x", padx=8, pady=(0, 8))
         self._btn(button_row, "📂 Загрузить адреса", self._load_addresses_file, BLUE).pack(side="left")
+        self._btn(button_row, "🧩 Извлечь адреса из файла", self._extract_addresses_from_file, PURPLE).pack(side="left", padx=8)
         self._btn(button_row, "🧹 Очистить", self._clear_addresses, RED).pack(side="left", padx=8)
         self.btn_check_balance = self._btn(button_row, "💰 Проверить баланс", self._check_balances, GREEN, big=True)
         self.btn_check_balance.pack(side="right")
@@ -893,6 +913,10 @@ class App(tk.Tk):
             fg=TEXT_DIM,
             font=FONT_SMALL,
         ).pack(anchor="w", padx=12, pady=(0, 6))
+
+        auto_row = tk.Frame(btr_frame, bg=BG2)
+        auto_row.pack(fill="x", padx=8, pady=(0, 8))
+        self._btn(auto_row, "⬇ Автоскачать btcrecover", self._download_btcrecover, ACCENT).pack(side="left")
 
         venv_frame = self._section(parent, "Virtual Environment для btcrecover", BLUE)
         venv_frame.pack(fill="x", padx=8, pady=4)
@@ -1135,9 +1159,138 @@ python .\\wallet_recovery_gui_final.py
         if path:
             self.wallet_hash_path.set(path)
 
+    def _download_file(self, url: str, dst: Path):
+        req = urllib.request.Request(url, headers={"User-Agent": "wallet-recovery-gui/1.0"})
+        with urllib.request.urlopen(req, timeout=120) as resp, open(dst, "wb") as out:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+    def _download_btcrecover(self):
+        target = Path(self.btr_dir.get().strip())
+        if not target:
+            messagebox.showerror("Ошибка", "Укажи папку btcrecover.")
+            return
+        self._log_cfg("Старт автоскачивания btcrecover...", "info")
+        threading.Thread(target=self._download_btcrecover_worker, args=(target,), daemon=True).start()
+
+    def _download_btcrecover_worker(self, target: Path):
+        try:
+            archive_url = "https://github.com/3rdIteration/btcrecover/archive/refs/heads/master.zip"
+            work_dir = target.parent
+            work_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = work_dir / "btcrecover_master.zip"
+
+            self.after(0, self._log_cfg, f"Скачиваю: {archive_url}", "info")
+            self._download_file(archive_url, archive_path)
+            self.after(0, self._log_cfg, f"Архив сохранен: {archive_path}", "ok")
+
+            extract_root = work_dir / "_btcrecover_extract"
+            if extract_root.exists():
+                import shutil
+                shutil.rmtree(extract_root)
+            extract_root.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(extract_root)
+
+            src_dir = extract_root / "btcrecover-master"
+            if not src_dir.exists():
+                raise RuntimeError("Не найден каталог btcrecover-master после распаковки")
+
+            if target.exists():
+                import shutil
+                backup = target.with_name(target.name + "_backup")
+                if backup.exists():
+                    shutil.rmtree(backup)
+                target.rename(backup)
+                self.after(0, self._log_cfg, f"Старая папка перенесена в backup: {backup}", "info")
+
+            src_dir.rename(target)
+            self.after(0, self._log_cfg, f"✓ btcrecover установлен: {target}", "ok")
+            self.after(0, self._sync_btr_path)
+            self.after(0, self._check_venv)
+        except Exception as exc:
+            self.after(0, self._log_cfg, f"✗ Автоскачивание btcrecover не удалось: {exc}", "err")
+
+    def _download_hashcat(self):
+        self._log_hashcat("Старт автоскачивания Hashcat...", "info")
+        threading.Thread(target=self._download_hashcat_worker, daemon=True).start()
+
+    def _download_hashcat_worker(self):
+        try:
+            if sys.platform != "win32":
+                raise RuntimeError("Автоскачивание Hashcat сейчас реализовано только для Windows (скачивается .7z архив).")
+
+            url = "https://hashcat.net/files/hashcat-6.2.6.7z"
+            base_dir = Path(self.work_dir.get().strip() or Path.cwd())
+            hashcat_dir = base_dir / "hashcat"
+            archive_path = base_dir / "hashcat-6.2.6.7z"
+
+            self.after(0, self._log_hashcat, f"Скачиваю: {url}", "info")
+            self._download_file(url, archive_path)
+            self.after(0, self._log_hashcat, f"Архив сохранён: {archive_path}", "ok")
+            self.after(0, self._log_hashcat, "Распакуй .7z (7-Zip) в папку hashcat и выбери hashcat.exe через кнопку 📂.", "info")
+
+            guessed = hashcat_dir / "hashcat.exe"
+            if guessed.exists():
+                self.after(0, self.hashcat_path.set, str(guessed))
+                self.after(0, self._log_hashcat, f"✓ Найден hashcat.exe: {guessed}", "ok")
+        except Exception as exc:
+            self.after(0, self._log_hashcat, f"✗ Автоскачивание Hashcat не удалось: {exc}", "err")
+
+    def _download_bitcoin2john(self):
+        self._log_hashcat("Старт автоскачивания John Jumbo (для bitcoin2john.py)...", "info")
+        threading.Thread(target=self._download_bitcoin2john_worker, daemon=True).start()
+
+    def _download_bitcoin2john_worker(self):
+        try:
+            url = "https://github.com/openwall/john/archive/refs/heads/bleeding-jumbo.zip"
+            base_dir = Path(self.work_dir.get().strip() or Path.cwd())
+            archive_path = base_dir / "john-bleeding-jumbo.zip"
+            extract_root = base_dir / "_john_extract"
+            john_target = base_dir / "john"
+
+            self.after(0, self._log_hashcat, f"Скачиваю: {url}", "info")
+            self._download_file(url, archive_path)
+            self.after(0, self._log_hashcat, f"Архив сохранён: {archive_path}", "ok")
+
+            if extract_root.exists():
+                import shutil
+                shutil.rmtree(extract_root)
+            extract_root.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(extract_root)
+
+            src_dir = extract_root / "john-bleeding-jumbo"
+            if not src_dir.exists():
+                raise RuntimeError("Не найден каталог john-bleeding-jumbo после распаковки")
+
+            if john_target.exists():
+                import shutil
+                backup = john_target.with_name("john_backup")
+                if backup.exists():
+                    shutil.rmtree(backup)
+                john_target.rename(backup)
+                self.after(0, self._log_hashcat, f"Старая папка john перенесена в backup: {backup}", "info")
+
+            src_dir.rename(john_target)
+            b2j = john_target / "run" / "bitcoin2john.py"
+            if not b2j.exists():
+                raise RuntimeError("bitcoin2john.py не найден в john/run после установки")
+
+            self.after(0, self.bitcoin2john_path.set, str(b2j))
+            self.after(0, self._log_hashcat, f"✓ bitcoin2john.py установлен: {b2j}", "ok")
+            self.after(0, lambda: self.hashcat_status_var.set("bitcoin2john.py установлен"))
+        except Exception as exc:
+            self.after(0, self._log_hashcat, f"✗ Автоскачивание bitcoin2john не удалось: {exc}", "err")
+
     # ── Сохранение / загрузка ─────────────────────────────────────────────────
-    def _save_data(self):
-        data = {
+    def _collect_data(self):
+        return {
             "words": self.lst_words.get(),
             "phrases": self.lst_phrases.get(),
             "numbers": self.lst_numbers.get(),
@@ -1171,21 +1324,62 @@ python .\\wallet_recovery_gui_final.py
             "addresses_text": self.address_text.get("1.0", "end").strip(),
         }
 
+    def _save_data_to_disk(self):
+        data = self._collect_data()
+        bak_file = DATA_FILE.with_suffix(".bak")
+        tmp_file = DATA_FILE.with_suffix(".tmp")
+        if DATA_FILE.exists():
+            try:
+                DATA_FILE.replace(bak_file)
+            except Exception:
+                pass
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_file.replace(DATA_FILE)
+
+    def _save_data(self):
         try:
-            tmp_file = DATA_FILE.with_suffix(".tmp")
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            tmp_file.replace(DATA_FILE)
+            self._save_data_to_disk()
             messagebox.showinfo("Сохранено", f"Данные сохранены:\n{DATA_FILE}")
         except Exception as exc:
             messagebox.showerror("Ошибка сохранения", f"Не удалось сохранить настройки:\n\n{exc}")
 
+    def _save_data_silent(self):
+        try:
+            self._save_data_to_disk()
+        except Exception as exc:
+            print(f"Ошибка автосохранения {DATA_FILE}: {exc}")
+
+    def _start_autosave(self):
+        self._autosave_tick()
+
+    def _autosave_tick(self):
+        self._save_data_silent()
+        self._autosave_job = self.after(15000, self._autosave_tick)
+
+    def _on_close(self):
+        if self._autosave_job is not None:
+            try:
+                self.after_cancel(self._autosave_job)
+            except Exception:
+                pass
+            self._autosave_job = None
+        self._save_data_silent()
+        self.destroy()
+
     def _load_data(self):
-        if not DATA_FILE.exists():
+        candidates = [DATA_FILE, DATA_FILE.with_suffix(".bak"), DATA_FILE.with_suffix(".tmp")]
+        source_file = None
+        for candidate in candidates:
+            if candidate.exists():
+                source_file = candidate
+                break
+
+        if source_file is None:
             return
 
         try:
-            with open(DATA_FILE, encoding="utf-8") as f:
+            with open(source_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             self.lst_words.set(data.get("words", []))
@@ -1235,7 +1429,7 @@ python .\\wallet_recovery_gui_final.py
                 self.address_text.delete("1.0", "end")
                 self.address_text.insert("1.0", data.get("addresses_text", ""))
         except Exception as exc:
-            print(f"Ошибка загрузки {DATA_FILE}: {exc}")
+            print(f"Ошибка загрузки {source_file}: {exc}")
 
     def _clear_all(self):
         if messagebox.askyesno("Очистить", "Очистить все слова, фразы, цифры и спецсимволы?"):
@@ -1921,13 +2115,32 @@ python .\\wallet_recovery_gui_final.py
         self.hashcat_log.delete("1.0", "end")
         self.hashcat_log.configure(state="disabled")
 
-        cmd = [str(py), b2j, wallet]
+        wallet_copy = self._prepare_safe_wallet_copy(Path(wallet))
+        if wallet_copy is None:
+            self.hashcat_status_var.set("Не удалось подготовить копию wallet.dat")
+            return
+
+        cmd = [str(py), b2j, str(wallet_copy)]
         self._log_hashcat("Извлекаю hash через bitcoin2john.py:", "info")
+        self._log_hashcat(f"Использую безопасную копию wallet.dat: {wallet_copy}", "info")
         self._log_hashcat(" ".join(cmd), "info")
         self.btn_extract_hash.config(state="disabled")
         self.hashcat_status_var.set("Извлекаю hash...")
 
         threading.Thread(target=self._extract_wallet_hash_worker, args=(cmd, out), daemon=True).start()
+
+    def _prepare_safe_wallet_copy(self, wallet_path: Path):
+        try:
+            import shutil
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            copies_dir = Path(self.work_dir.get().strip() or Path.cwd()) / "safe_wallet_copies"
+            copies_dir.mkdir(parents=True, exist_ok=True)
+            dst = copies_dir / f"{wallet_path.stem}_{ts}{wallet_path.suffix}"
+            shutil.copy2(wallet_path, dst)
+            return dst
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось создать безопасную копию wallet.dat:\n{exc}")
+            return None
 
     def _extract_wallet_hash_worker(self, cmd, out):
         try:
@@ -2117,6 +2330,35 @@ python .\\wallet_recovery_gui_final.py
 
         self.address_text.delete("1.0", "end")
         self.address_text.insert("1.0", data)
+
+    def _extract_addresses_from_file(self):
+        path = filedialog.askopenfilename(
+            title="Извлечь BTC-адреса из файла",
+            filetypes=[("Text/JSON/CSV", "*.txt *.json *.csv *.log"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            try:
+                data = Path(path).read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                data = Path(path).read_text(encoding="cp1251", errors="ignore")
+
+            candidates = re.findall(r"\b(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", data, flags=re.IGNORECASE)
+            addresses = unique_keep_order([a.strip() for a in candidates if self._looks_like_btc_address(a.strip())])
+            if not addresses:
+                messagebox.showwarning("Адреса не найдены", "В выбранном файле не удалось найти BTC-адреса.")
+                return
+
+            old_addresses = self._get_addresses_from_text()
+            merged = unique_keep_order(old_addresses + addresses)
+            self.address_text.delete("1.0", "end")
+            self.address_text.insert("1.0", "\n".join(merged) + "\n")
+            self._log_balance(f"Из файла извлечено {len(addresses)} адресов, всего в списке: {len(merged)}", "ok")
+            self.balance_summary_var.set(f"Готово к проверке: {len(merged)} адресов")
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось извлечь адреса:\n{exc}")
 
     def _clear_addresses(self):
         self.address_text.delete("1.0", "end")
