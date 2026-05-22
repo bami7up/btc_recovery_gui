@@ -2,7 +2,7 @@
 """
 Wallet Recovery GUI — инструмент восстановления пароля СВОЕГО Bitcoin wallet.dat.
 
-Python: 3.8+
+Python: 3.12 (обязательно)
 GUI: tkinter
 
 Возможности:
@@ -129,6 +129,28 @@ def alt_case_inverse(text: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+def _get_python_version(py_path: Path):
+    try:
+        result = subprocess.run(
+            [str(py_path), "-c", 'import sys; print("{}.{}.{}".format(sys.version_info.major, sys.version_info.minor, sys.version_info.micro))'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    return result.stdout.strip() or None
+
+
+def _is_python_312(py_path: Path) -> bool:
+    version = _get_python_version(py_path)
+    return bool(version and version.startswith("3.12."))
+
 
 
 class TagList(tk.Frame):
@@ -1263,9 +1285,15 @@ python .\\wallet_recovery_gui_final.py
         ok_venv = py.exists()
         ok_btr = btr.exists()
 
-        if ok_venv and ok_btr:
-            self.venv_status_var.set("✓ venv готов, btcrecover найден")
+        py_ver = _get_python_version(py) if ok_venv else None
+        ok_py312 = bool(py_ver and py_ver.startswith("3.12."))
+
+        if ok_venv and ok_btr and ok_py312:
+            self.venv_status_var.set("✓ venv готов (Python 3.12), btcrecover найден")
             self.venv_status_lbl.config(fg=GREEN)
+        elif ok_venv and not ok_py312:
+            self.venv_status_var.set("✗ venv есть, но Python не 3.12")
+            self.venv_status_lbl.config(fg=RED)
         elif ok_venv:
             self.venv_status_var.set("⚠ venv есть, но btcrecover.py не найден")
             self.venv_status_lbl.config(fg=ACCENT)
@@ -1273,7 +1301,10 @@ python .\\wallet_recovery_gui_final.py
             self.venv_status_var.set("✗ venv не создан")
             self.venv_status_lbl.config(fg=RED)
 
-        self._log_cfg(f"Python venv : {'✓ ' + str(py) if ok_venv else '✗ не найден'}", "ok" if ok_venv else "err")
+        py_status = f"✓ {py}" if ok_venv else "✗ не найден"
+        if ok_venv:
+            py_status += f" (версия: {py_ver or 'не определена'})"
+        self._log_cfg(f"Python venv : {py_status}", "ok" if ok_venv and ok_py312 else "err")
         self._log_cfg(f"btcrecover  : {'✓ ' + str(btr) if ok_btr else '✗ не найден'}", "ok" if ok_btr else "err")
 
     def _create_venv(self):
@@ -1286,8 +1317,40 @@ python .\\wallet_recovery_gui_final.py
 
     def _create_venv_worker(self, target):
         try:
-            venv_mod.create(target, with_pip=True, clear=True)
-            self.after(0, self._log_cfg, "✓ venv создан", "ok")
+            target_path = Path(target)
+            if sys.platform == "win32":
+                cmd = ["py", "-3.12", "-m", "venv", str(target_path)]
+                self.after(0, self._log_cfg, "Пробую создать venv через Python Launcher: py -3.12", "info")
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                if proc.stdout:
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        if line:
+                            self.after(0, self._log_cfg, line)
+                proc.wait()
+
+                if proc.returncode != 0:
+                    raise RuntimeError("Не удалось создать venv через py -3.12. Убедись, что Python 3.12 установлен и доступен в py launcher.")
+            else:
+                if not _is_python_312(Path(sys.executable)):
+                    raise RuntimeError("Текущий интерпретатор не Python 3.12. Запусти GUI под Python 3.12.")
+                venv_mod.create(target, with_pip=True, clear=True)
+
+            py = target_path / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+            self.after(0, self._log_cfg, "Устанавливаю bsddb3 в новый venv (для bitcoin2john)...", "info")
+            pip_cmd = [str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "bsddb3"]
+            pip_proc = subprocess.Popen(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            if pip_proc.stdout:
+                for line in pip_proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        self.after(0, self._log_cfg, line)
+            pip_proc.wait()
+            if pip_proc.returncode != 0:
+                raise RuntimeError("venv создан, но не удалось установить bsddb3. Установи вручную: python -m pip install bsddb3")
+
+            self.after(0, self._log_cfg, "✓ venv создан (Python 3.12), bsddb3 установлен", "ok")
             self.after(0, self._check_venv)
         except Exception as exc:
             self.after(0, self._log_cfg, f"✗ Ошибка создания venv: {exc}", "err")
@@ -1306,8 +1369,12 @@ python .\\wallet_recovery_gui_final.py
             )
             return
 
-        cmd = [str(py), "-m", "pip", "install", "-r", str(req)]
-        self._log_cfg("Устанавливаю зависимости btcrecover...", "info")
+        if not _is_python_312(py):
+            messagebox.showerror("Ошибка", "Этот инструмент поддерживает только venv на Python 3.12. Пересоздай venv через py -3.12 -m venv ...")
+            return
+
+        cmd = [str(py), "-m", "pip", "install", "-r", str(req), "bsddb3"]
+        self._log_cfg("Устанавливаю зависимости btcrecover + bsddb3...", "info")
         threading.Thread(target=self._install_deps_worker, args=(cmd,), daemon=True).start()
 
     def _install_deps_worker(self, cmd):
@@ -1674,6 +1741,10 @@ python .\\wallet_recovery_gui_final.py
         btr = self.btcrecover_path.get().strip()
         py = self._venv_python()
 
+        if not _is_python_312(py):
+            messagebox.showerror("Ошибка", "Для запуска нужен Python 3.12 в venv. Пересоздай venv через py -3.12 -m venv ...")
+            return
+
         if not wallet or not Path(wallet).exists():
             messagebox.showerror("Ошибка", f"wallet.dat не найден:\n{wallet}")
             return
@@ -1831,6 +1902,10 @@ python .\\wallet_recovery_gui_final.py
         b2j = self.bitcoin2john_path.get().strip()
         out = self.wallet_hash_path.get().strip()
         py = self._venv_python() if self._venv_python().exists() else Path(sys.executable)
+
+        if not _is_python_312(py):
+            messagebox.showerror("Ошибка", "Для запуска нужен Python 3.12 в venv. Пересоздай venv через py -3.12 -m venv ...")
+            return
 
         if not wallet or not Path(wallet).exists():
             messagebox.showerror("Ошибка", f"wallet.dat не найден:\n{wallet}")
