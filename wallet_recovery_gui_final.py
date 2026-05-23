@@ -1876,7 +1876,14 @@ python .\\wallet_recovery_gui_final.py
         self.progress_elapsed_var.set(f"Время: {self._format_duration(elapsed)}")
         self.progress_scenario_var.set(f"Сценарий: {self._current_scenario}")
         self.progress_speed_var.set(f"Скорость: {self._last_speed}")
-        self.progress_checked_var.set(f"Проверено: {self._last_checked_password}")
+        checked_value = self._parse_checked_count()
+        if checked_value is not None and self._dict_line_count > 0:
+            pct = min(100.0, (checked_value / self._dict_line_count) * 100.0)
+            self.progress_checked_var.set(
+                f"Проверено: {self._last_checked_password} (~{pct:.2f}% текущего словаря)"
+            )
+        else:
+            self.progress_checked_var.set(f"Проверено: {self._last_checked_password}")
 
         if self._last_output_at:
             silent = int(now - self._last_output_at)
@@ -1911,6 +1918,13 @@ python .\\wallet_recovery_gui_final.py
             if m:
                 self._last_checked_password = m.group(1).strip()
                 break
+
+    def _parse_checked_count(self):
+        raw = (self._last_checked_password or "").strip()
+        if not raw or raw == "—":
+            return None
+        cleaned = raw.replace(" ", "").replace(",", "").replace(".", "")
+        return int(cleaned) if cleaned.isdigit() else None
 
     # ── btcrecover ────────────────────────────────────────────────────────────
     def _build_run_plan(self, py, btr, wallet, dct):
@@ -2040,26 +2054,45 @@ python .\\wallet_recovery_gui_final.py
             cwd=work_dir,
         )
 
+        def handle_output(raw_line):
+            line = raw_line.rstrip()
+            if not line:
+                return
+
+            low = line.lower()
+            tag = None
+
+            self._parse_btcrecover_progress(line)
+
+            if "password found" in low or "пароль найден" in low:
+                tag = "found"
+            elif "error" in low or "ошибка" in low or "traceback" in low:
+                tag = "error"
+
+            self.after(0, self._log_run, line, tag)
+
         if self.proc.stdout:
-            for line in self.proc.stdout:
+            buffer = ""
+            while True:
                 if self._stop_requested:
                     break
 
-                line = line.rstrip()
-                if not line:
+                ch = self.proc.stdout.read(1)
+                if ch == "" and self.proc.poll() is not None:
+                    break
+                if ch == "":
                     continue
 
-                low = line.lower()
-                tag = None
+                if ch in ("\n", "\r"):
+                    if buffer:
+                        handle_output(buffer)
+                        buffer = ""
+                    continue
 
-                self._parse_btcrecover_progress(line)
+                buffer += ch
 
-                if "password found" in low or "пароль найден" in low:
-                    tag = "found"
-                elif "error" in low or "ошибка" in low or "traceback" in low:
-                    tag = "error"
-
-                self.after(0, self._log_run, line, tag)
+            if buffer:
+                handle_output(buffer)
 
         if self._stop_requested and self.proc and self.proc.poll() is None:
             try:
