@@ -46,7 +46,7 @@ btc_recovery/
 ### Шаг 1. Клонируйте/скачайте этот проект
 
 ```bash
-git clone <URL-ВАШЕГО-РЕПО>
+git clone https://github.com/bami7up/btc_recovery_gui
 cd btc_recovery_gui
 ```
 
