@@ -18,7 +18,7 @@
 
 ## 2. Требования
 
-- Python 3.8+
+- Python 3.8+ для GUI; для venv btcrecover рекомендуется Python 3.8–3.12
 - Tkinter (обычно входит в стандартный Python)
 - Git (для удобной установки `btcrecover`)
 - `btcrecover` (репозиторий)
@@ -205,14 +205,19 @@ py -3.12 -m venv btcrecover_venv
 ### `requirements.txt` не найден
 Проверьте, что репозиторий `btcrecover` корректно клонирован.
 
-### Ошибки модулей при работе `bitcoin2john.py`
-Попробуйте установить `bsddb3` в venv:
+### Ошибки зависимостей `bsddb3` / `db/include\db.h`
+`bsddb3` нужен только для некоторых версий `bitcoin2john.py`, но не нужен для запуска `btcrecover`. Поэтому GUI устанавливает зависимости `btcrecover` отдельно и больше не добавляет `bsddb3` в общий `pip install`.
+
+Если `bitcoin2john.py` пишет `No module named 'bsddb3'`, используйте один из вариантов:
 
 ```bash
-python -m pip install bsddb3
+# отдельный venv на Python 3.9–3.11 часто проще для bsddb3
+py -3.11 -m venv john_venv
+.\john_venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\john_venv\Scripts\python.exe -m pip install bsddb3
 ```
 
-(или через интерпретатор вашего `btcrecover_venv`).
+Либо скачайте свежий John the Ripper Jumbo и используйте его `bitcoin2john.py`. Ошибка `FileNotFoundError: db/include\db.h` означает, что pip пытается собрать старый `bsddb3` из исходников и не нашёл заголовки Berkeley DB; это отдельная проблема `bitcoin2john.py`, а не `btcrecover`/pip.
 
 ### Hashcat завершается с ошибкой
 - Проверьте правильность mode (`11300` для многих `wallet.dat` Bitcoin Core).

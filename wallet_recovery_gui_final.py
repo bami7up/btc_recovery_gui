@@ -2,7 +2,7 @@
 """
 Wallet Recovery GUI — инструмент восстановления пароля СВОЕГО Bitcoin wallet.dat.
 
-Python: 3.12 (обязательно)
+Python: 3.8+ (для GUI), venv btcrecover: Python 3.8–3.12
 GUI: tkinter
 
 Возможности:
@@ -148,9 +148,25 @@ def _get_python_version(py_path: Path):
     return result.stdout.strip() or None
 
 
-def _is_python_312(py_path: Path) -> bool:
+def _parse_python_version(version: str):
+    try:
+        parts = version.split(".")
+        return int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
+    except Exception:
+        return None
+
+
+def _is_supported_venv_python(py_path: Path) -> bool:
     version = _get_python_version(py_path)
-    return bool(version and version.startswith("3.12."))
+    parsed = _parse_python_version(version or "")
+    if not parsed:
+        return False
+    major, minor, _micro = parsed
+    return major == 3 and 8 <= minor <= 12
+
+
+def _format_supported_python_hint() -> str:
+    return "Python 3.8–3.12"
 
 
 
@@ -999,12 +1015,12 @@ class App(tk.Tk):
 
         help_text = """Что нужно скачать и зачем
 
-1. Python 3.12
+1. Python 3.8–3.12
    Официально:
    https://www.python.org/downloads/
 
    На Windows удобно проверять так:
-   py -3.12 --version
+   py -3.12 --version  (или py -3.11 --version)
 
    Для venv:
    py -3.12 -m venv C:\\btc_recovery\\btcrecover_venv
@@ -1032,19 +1048,15 @@ class App(tk.Tk):
    C:\\btc_recovery\\john\\run\\bitcoin2john.py
 
 
-4. bsddb3 для bitcoin2john.py
-   Если bitcoin2john.py ругается:
-   ModuleNotFoundError: No module named 'bsddb3'
+4. Модуль Berkeley DB для bitcoin2john.py
+   btcrecover НЕ требует bsddb3, поэтому GUI больше не ставит его вместе
+   с основными зависимостями. Ошибка db/include\\db.h возникает при сборке
+   старого bsddb3 из исходников на Windows/Python 3.12.
 
-   Поставить в venv:
-   C:\\btc_recovery\\btcrecover_venv\\Scripts\\python.exe -m pip install bsddb3
-
-   Если venv создан не на Python 3.12, лучше пересоздать:
-   cd C:\\btc_recovery
-   rmdir /s /q btcrecover_venv
-   py -3.12 -m venv btcrecover_venv
-   .\\btcrecover_venv\\Scripts\\python.exe -m pip install --upgrade pip setuptools wheel
-   .\\btcrecover_venv\\Scripts\\python.exe -m pip install bsddb3
+   Если bitcoin2john.py ругается на bsddb3, варианты:
+   - используйте свежий John the Ripper Jumbo с готовым bitcoin2john.py;
+   - создайте отдельный venv на Python 3.9–3.11 и установите bsddb3 там;
+   - установите Berkeley DB/Build Tools вручную, если хотите собирать bsddb3 из исходников.
 
 
 5. Hashcat
@@ -1480,13 +1492,13 @@ python .\\wallet_recovery_gui_final.py
         ok_btr = btr.exists()
 
         py_ver = _get_python_version(py) if ok_venv else None
-        ok_py312 = bool(py_ver and py_ver.startswith("3.12."))
+        ok_py_supported = bool(py_ver and _is_supported_venv_python(py))
 
-        if ok_venv and ok_btr and ok_py312:
-            self.venv_status_var.set("✓ venv готов (Python 3.12), btcrecover найден")
+        if ok_venv and ok_btr and ok_py_supported:
+            self.venv_status_var.set(f"✓ venv готов ({py_ver}), btcrecover найден")
             self.venv_status_lbl.config(fg=GREEN)
-        elif ok_venv and not ok_py312:
-            self.venv_status_var.set("✗ venv есть, но Python не 3.12")
+        elif ok_venv and not ok_py_supported:
+            self.venv_status_var.set(f"✗ venv есть, но нужен {_format_supported_python_hint()}")
             self.venv_status_lbl.config(fg=RED)
         elif ok_venv:
             self.venv_status_var.set("⚠ venv есть, но btcrecover.py не найден")
@@ -1498,7 +1510,7 @@ python .\\wallet_recovery_gui_final.py
         py_status = f"✓ {py}" if ok_venv else "✗ не найден"
         if ok_venv:
             py_status += f" (версия: {py_ver or 'не определена'})"
-        self._log_cfg(f"Python venv : {py_status}", "ok" if ok_venv and ok_py312 else "err")
+        self._log_cfg(f"Python venv : {py_status}", "ok" if ok_venv and ok_py_supported else "err")
         self._log_cfg(f"btcrecover  : {'✓ ' + str(btr) if ok_btr else '✗ не найден'}", "ok" if ok_btr else "err")
 
     def _create_venv(self):
@@ -1513,27 +1525,30 @@ python .\\wallet_recovery_gui_final.py
         try:
             target_path = Path(target)
             if sys.platform == "win32":
-                cmd = ["py", "-3.12", "-m", "venv", str(target_path)]
-                self.after(0, self._log_cfg, "Пробую создать venv через Python Launcher: py -3.12", "info")
+                proc = None
+                for py_tag in ("-3.12", "-3.11", "-3.10", "-3.9", "-3.8"):
+                    cmd = ["py", py_tag, "-m", "venv", str(target_path)]
+                    self.after(0, self._log_cfg, f"Пробую создать venv через Python Launcher: py {py_tag}", "info")
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            line = line.rstrip()
+                            if line:
+                                self.after(0, self._log_cfg, line)
+                    proc.wait()
+                    if proc.returncode == 0:
+                        break
 
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                if proc.stdout:
-                    for line in proc.stdout:
-                        line = line.rstrip()
-                        if line:
-                            self.after(0, self._log_cfg, line)
-                proc.wait()
-
-                if proc.returncode != 0:
-                    raise RuntimeError("Не удалось создать venv через py -3.12. Убедись, что Python 3.12 установлен и доступен в py launcher.")
+                if proc is None or proc.returncode != 0:
+                    raise RuntimeError(f"Не удалось создать venv. Установи {_format_supported_python_hint()} и проверь py launcher.")
             else:
-                if not _is_python_312(Path(sys.executable)):
-                    raise RuntimeError("Текущий интерпретатор не Python 3.12. Запусти GUI под Python 3.12.")
+                if not _is_supported_venv_python(Path(sys.executable)):
+                    raise RuntimeError(f"Текущий интерпретатор не поддерживается. Запусти GUI под {_format_supported_python_hint()}.")
                 venv_mod.create(target, with_pip=True, clear=True)
 
             py = target_path / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-            self.after(0, self._log_cfg, "Устанавливаю bsddb3 в новый venv (для bitcoin2john)...", "info")
-            pip_cmd = [str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "bsddb3"]
+            self.after(0, self._log_cfg, "Обновляю pip/setuptools/wheel в новом venv...", "info")
+            pip_cmd = [str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
             pip_proc = subprocess.Popen(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             if pip_proc.stdout:
                 for line in pip_proc.stdout:
@@ -1542,9 +1557,9 @@ python .\\wallet_recovery_gui_final.py
                         self.after(0, self._log_cfg, line)
             pip_proc.wait()
             if pip_proc.returncode != 0:
-                raise RuntimeError("venv создан, но не удалось установить bsddb3. Установи вручную: python -m pip install bsddb3")
+                raise RuntimeError("venv создан, но не удалось обновить pip/setuptools/wheel")
 
-            self.after(0, self._log_cfg, "✓ venv создан (Python 3.12), bsddb3 установлен", "ok")
+            self.after(0, self._log_cfg, "✓ venv создан, базовые инструменты pip обновлены", "ok")
             self.after(0, self._check_venv)
         except Exception as exc:
             self.after(0, self._log_cfg, f"✗ Ошибка создания venv: {exc}", "err")
@@ -1563,12 +1578,12 @@ python .\\wallet_recovery_gui_final.py
             )
             return
 
-        if not _is_python_312(py):
-            messagebox.showerror("Ошибка", "Этот инструмент поддерживает только venv на Python 3.12. Пересоздай venv через py -3.12 -m venv ...")
+        if not _is_supported_venv_python(py):
+            messagebox.showerror("Ошибка", f"Этот инструмент поддерживает venv на {_format_supported_python_hint()}.")
             return
 
-        cmd = [str(py), "-m", "pip", "install", "-r", str(req), "bsddb3"]
-        self._log_cfg("Устанавливаю зависимости btcrecover + bsddb3...", "info")
+        cmd = [str(py), "-m", "pip", "install", "-r", str(req)]
+        self._log_cfg("Устанавливаю зависимости btcrecover (без необязательного bsddb3)...", "info")
         threading.Thread(target=self._install_deps_worker, args=(cmd,), daemon=True).start()
 
     def _install_deps_worker(self, cmd):
@@ -1949,8 +1964,8 @@ python .\\wallet_recovery_gui_final.py
         btr = self.btcrecover_path.get().strip()
         py = self._venv_python()
 
-        if not _is_python_312(py):
-            messagebox.showerror("Ошибка", "Для запуска нужен Python 3.12 в venv. Пересоздай venv через py -3.12 -m venv ...")
+        if not _is_supported_venv_python(py):
+            messagebox.showerror("Ошибка", f"Для запуска нужен venv на {_format_supported_python_hint()}.")
             return
 
         if not wallet or not Path(wallet).exists():
@@ -2130,8 +2145,8 @@ python .\\wallet_recovery_gui_final.py
         out = self.wallet_hash_path.get().strip()
         py = self._venv_python() if self._venv_python().exists() else Path(sys.executable)
 
-        if not _is_python_312(py):
-            messagebox.showerror("Ошибка", "Для запуска нужен Python 3.12 в venv. Пересоздай venv через py -3.12 -m venv ...")
+        if not _is_supported_venv_python(py):
+            messagebox.showerror("Ошибка", f"Для запуска нужен venv на {_format_supported_python_hint()}.")
             return
 
         if not wallet or not Path(wallet).exists():
@@ -2197,6 +2212,17 @@ python .\\wallet_recovery_gui_final.py
 
             if proc.returncode != 0 and not bitcoin_hash:
                 self.after(0, self._log_hashcat, f"bitcoin2john завершился с кодом {proc.returncode}", "err")
+                output_text = "\n".join(lines).lower()
+                if "bsddb3" in output_text or "db/include" in output_text:
+                    self.after(
+                        0,
+                        self._log_hashcat,
+                        "Подсказка: btcrecover уже можно запускать без bsddb3. "
+                        "Для bitcoin2john используйте свежий John Jumbo или отдельный venv "
+                        "на Python 3.9–3.11 с установленным bsddb3; на Python 3.12 "
+                        "bsddb3 часто падает при сборке с db/include\\db.h.",
+                        "err",
+                    )
                 self.after(0, lambda: self.hashcat_status_var.set("Ошибка извлечения hash"))
                 return
 
