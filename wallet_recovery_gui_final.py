@@ -31,6 +31,7 @@ GUI: tkinter
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -328,6 +329,8 @@ class App(tk.Tk):
         self._current_scenario = "—"
         self._last_speed = "—"
         self._last_checked_password = "—"
+        self._progress_percent = None
+        self._progress_bar_mode = None
         self._autosave_job = None
 
         self._build_ui()
@@ -379,6 +382,14 @@ class App(tk.Tk):
         )
         style.map("TNotebook.Tab", background=[("selected", BG2)], foreground=[("selected", ACCENT)])
         style.configure("Vertical.TScrollbar", background=BG3, troughcolor=BG2, borderwidth=0, arrowcolor=TEXT_DIM)
+        style.configure(
+            "Wallet.Horizontal.TProgressbar",
+            troughcolor=BG3,
+            background=ACCENT,
+            bordercolor=BORDER,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+        )
 
     def _build_ui(self):
         header = tk.Frame(self, bg=BG, pady=14)
@@ -673,6 +684,7 @@ class App(tk.Tk):
         self.progress_speed_var = tk.StringVar(value="Скорость: —")
         self.progress_last_var = tk.StringVar(value="Последняя активность: —")
         self.progress_checked_var = tk.StringVar(value="Проверено: —")
+        self.progress_percent_var = tk.StringVar(value="Прогресс: —")
 
         labels = [
             self.progress_scenario_var,
@@ -691,6 +703,27 @@ class App(tk.Tk):
                 font=FONT_SMALL,
                 anchor="w",
             ).grid(row=i // 2, column=(i % 2) * 2, columnspan=2, sticky="ew", padx=6, pady=2)
+
+        progress_row = tk.Frame(stats_grid, bg=BG2)
+        progress_row.grid(row=3, column=0, columnspan=4, sticky="ew", padx=6, pady=(6, 2))
+        progress_row.columnconfigure(1, weight=1)
+        tk.Label(
+            progress_row,
+            textvariable=self.progress_percent_var,
+            bg=BG2,
+            fg=ACCENT,
+            font=FONT_SMALL,
+            anchor="w",
+            width=24,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.progress_bar = ttk.Progressbar(
+            progress_row,
+            orient="horizontal",
+            mode="indeterminate",
+            maximum=100,
+            style="Wallet.Horizontal.TProgressbar",
+        )
+        self.progress_bar.grid(row=0, column=1, sticky="ew")
 
         tk.Label(parent, text="Вывод btcrecover:", bg=BG, fg=TEXT_DIM, font=FONT_SMALL).pack(anchor="w", padx=8)
         self.run_log = scrolledtext.ScrolledText(
@@ -1870,6 +1903,8 @@ python .\\wallet_recovery_gui_final.py
         self._current_scenario = "—"
         self._last_speed = "—"
         self._last_checked_password = "—"
+        self._progress_percent = None
+        self._progress_bar_mode = None
 
         self.progress_scenario_var.set("Сценарий: —")
         self.progress_elapsed_var.set("Время: 00:00:00")
@@ -1877,6 +1912,9 @@ python .\\wallet_recovery_gui_final.py
         self.progress_speed_var.set("Скорость: —")
         self.progress_last_var.set("Последняя активность: —")
         self.progress_checked_var.set("Проверено: —")
+        self.progress_percent_var.set("Прогресс: —")
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate", value=0)
 
     def _start_progress_timer(self):
         self._update_progress_timer()
@@ -1891,6 +1929,7 @@ python .\\wallet_recovery_gui_final.py
         self.progress_elapsed_var.set(f"Время: {self._format_duration(elapsed)}")
         self.progress_scenario_var.set(f"Сценарий: {self._current_scenario}")
         self.progress_speed_var.set(f"Скорость: {self._last_speed}")
+        self._update_progress_bar()
         checked_value = self._parse_checked_count()
         if checked_value is not None and self._dict_line_count > 0:
             pct = min(100.0, (checked_value / self._dict_line_count) * 100.0)
@@ -1908,14 +1947,58 @@ python .\\wallet_recovery_gui_final.py
 
         self.after(1000, self._update_progress_timer)
 
+    def _update_progress_bar(self):
+        if self._progress_percent is None:
+            if self._progress_bar_mode != "indeterminate":
+                self.progress_bar.configure(mode="indeterminate", value=0)
+                self.progress_bar.start(12)
+                self._progress_bar_mode = "indeterminate"
+            self.progress_percent_var.set("Прогресс: выполняется")
+            return
+
+        if self._progress_bar_mode != "determinate":
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self._progress_bar_mode = "determinate"
+
+        pct = max(0.0, min(100.0, self._progress_percent))
+        self.progress_bar.configure(value=pct)
+        self.progress_percent_var.set(f"Прогресс: {pct:.2f}%")
+
     def _parse_btcrecover_progress(self, line):
         self._last_output_at = time.time()
         low = line.lower()
 
+        percent_match = re.search(r"(?<![0-9])([0-9]{1,3}(?:[.,][0-9]+)?)\s*%", line)
+        if percent_match:
+            try:
+                self._progress_percent = float(percent_match.group(1).replace(",", "."))
+            except ValueError:
+                pass
+
+        count_patterns = [
+            r"(?<![:0-9])([0-9]+(?:[,. ][0-9]+)*)\s*/\s*([0-9]+(?:[,. ][0-9]+)*)",
+            r"(?<![:0-9])([0-9]+(?:[,. ][0-9]+)*)\s+(?:of|из)\s+([0-9]+(?:[,. ][0-9]+)*)",
+        ]
+        for pat in count_patterns:
+            m = re.search(pat, low)
+            if not m:
+                continue
+            checked = self._parse_number_text(m.group(1))
+            total = self._parse_number_text(m.group(2))
+            if checked is not None and total and total > 0:
+                self._last_checked_password = f"{checked:,}"
+                self._progress_percent = (checked / total) * 100.0
+                break
+
+        checked_value = self._parse_checked_count()
+        if checked_value is not None and self._dict_line_count > 0 and self._progress_percent is None:
+            self._progress_percent = (checked_value / self._dict_line_count) * 100.0
+
         speed_patterns = [
-            r"([0-9][0-9,. ]*) *(?:passwords|pass|pwd|p) */ *(?:sec|s|second)",
-            r"([0-9][0-9,. ]*) *(?:passwords|pass|pwd) *(?:per|/) *(?:minute|min)",
-            r"([0-9][0-9,. ]*) *p/s",
+            r"(?<![0-9])([0-9]+(?:[,.][0-9]+)?) *(?:passwords|pass|pwd|p) */ *(?:sec|s|second)",
+            r"(?<![0-9])([0-9]+(?:[,.][0-9]+)?) *(?:passwords|pass|pwd) *(?:per|/) *(?:minute|min)",
+            r"(?<![0-9])([0-9]+(?:[,.][0-9]+)?) *p/s",
         ]
         for pat in speed_patterns:
             m = re.search(pat, low)
@@ -1926,24 +2009,31 @@ python .\\wallet_recovery_gui_final.py
         checked_patterns = [
             r"password *# *([0-9][0-9,. ]*)",
             r"after finishing password *# *([0-9][0-9,. ]*)",
-            r"([0-9][0-9,. ]*) *passwords",
+            r"checked *([0-9][0-9,. ]*) *passwords",
+            r"проверено *([0-9][0-9,. ]*)",
         ]
         for pat in checked_patterns:
             m = re.search(pat, low)
             if m:
                 self._last_checked_password = m.group(1).strip()
+                checked_value = self._parse_checked_count()
+                if checked_value is not None and self._dict_line_count > 0 and self._progress_percent is None:
+                    self._progress_percent = (checked_value / self._dict_line_count) * 100.0
                 break
+
+    def _parse_number_text(self, raw):
+        cleaned = (raw or "").strip().replace(" ", "").replace(",", "").replace(".", "")
+        return int(cleaned) if cleaned.isdigit() else None
 
     def _parse_checked_count(self):
         raw = (self._last_checked_password or "").strip()
         if not raw or raw == "—":
             return None
-        cleaned = raw.replace(" ", "").replace(",", "").replace(".", "")
-        return int(cleaned) if cleaned.isdigit() else None
+        return self._parse_number_text(raw)
 
     # ── btcrecover ────────────────────────────────────────────────────────────
     def _build_run_plan(self, py, btr, wallet, dct):
-        base = [str(py), btr, "--wallet", wallet, "--passwordlist", dct]
+        base = [str(py), "-u", btr, "--wallet", wallet, "--passwordlist", dct]
         typo_types = ["--typos-case", "--typos-delete", "--typos-repeat", "--typos-swap"]
 
         runs = []
@@ -2045,7 +2135,9 @@ python .\\wallet_recovery_gui_final.py
                     self.after(0, self._log_run, f"Сценарий завершён с кодом {rc}: {name}", "error")
 
             if not self._stop_requested:
+                self._progress_percent = 100.0
                 self.after(0, self._log_run, "\n✓ Очередь запусков завершена.", "found")
+                self.after(0, self._update_progress_bar)
                 self.after(0, lambda: self.status_var.set("✓ Очередь завершена"))
                 self.after(0, lambda: self.status_lbl.config(fg=GREEN))
         except Exception as exc:
@@ -2058,15 +2150,23 @@ python .\\wallet_recovery_gui_final.py
             self._stop_requested = False
             self.after(0, lambda: self.btn_start.config(state="normal"))
             self.after(0, lambda: self.btn_stop.config(state="disabled"))
+            self.after(0, self.progress_bar.stop)
 
     def _run_single_btcrecover(self, cmd, work_dir):
+        env = dict(os.environ)
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+
         self.proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             cwd=work_dir,
+            env=env,
         )
 
         def handle_output(raw_line):
