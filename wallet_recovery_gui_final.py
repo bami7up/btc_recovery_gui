@@ -30,6 +30,8 @@ GUI: tkinter
   - Скрипт предназначен для восстановления собственного кошелька.
 """
 
+import concurrent.futures
+import itertools
 import json
 import os
 import re
@@ -172,11 +174,12 @@ def _format_supported_python_hint() -> str:
 
 
 class TagList(tk.Frame):
-    def __init__(self, master, color=ACCENT, height=180, **kwargs):
+    def __init__(self, master, color=ACCENT, height=180, on_change=None, **kwargs):
         super().__init__(master, bg=BG2, **kwargs)
         self.color = color
         self.items = []
         self._widgets = []
+        self._on_change = on_change
 
         row = tk.Frame(self, bg=BG2)
         row.pack(fill="x", padx=8, pady=(8, 4))
@@ -245,6 +248,8 @@ class TagList(tk.Frame):
         if not value or value in self.items:
             return
         self.items.append(value)
+        if self._on_change:
+            self._on_change()
         self._render(value)
 
     def _render(self, value):
@@ -264,6 +269,8 @@ class TagList(tk.Frame):
         def remove(v=value, r=row):
             if v in self.items:
                 self.items.remove(v)
+                if self._on_change:
+                    self._on_change()
             if r in self._widgets:
                 self._widgets.remove(r)
             r.destroy()
@@ -299,6 +306,9 @@ class TagList(tk.Frame):
             self.items.append(item)
             self._render(item)
 
+        if self._on_change:
+            self._on_change()
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -320,6 +330,7 @@ class App(tk.Tk):
         self.hashcat_proc = None
         self._running = False
         self._generating = False
+        self._stop_generation_flag = False
         self._stop_requested = False
 
         self._run_started_at = None
@@ -332,6 +343,7 @@ class App(tk.Tk):
         self._progress_percent = None
         self._progress_bar_mode = None
         self._autosave_job = None
+        self._data_dirty = False
 
         self._build_ui()
         self._sync_btr_path()
@@ -478,10 +490,10 @@ class App(tk.Tk):
             font=FONT_SMALL,
         ).pack(anchor="w", padx=8, pady=(4, 0))
 
-        self.lst_words = TagList(f_words, color=ACCENT)
-        self.lst_phrases = TagList(f_phrases, color=BLUE)
-        self.lst_numbers = TagList(f_numbers, color=GREEN)
-        self.lst_specials = TagList(f_specials, color=PURPLE)
+        self.lst_words = TagList(f_words, color=ACCENT, on_change=self._mark_dirty)
+        self.lst_phrases = TagList(f_phrases, color=BLUE, on_change=self._mark_dirty)
+        self.lst_numbers = TagList(f_numbers, color=GREEN, on_change=self._mark_dirty)
+        self.lst_specials = TagList(f_specials, color=PURPLE, on_change=self._mark_dirty)
 
         self.lst_words.pack(fill="both", expand=True)
         self.lst_phrases.pack(fill="both", expand=True)
@@ -542,7 +554,7 @@ class App(tk.Tk):
             font=FONT_SMALL,
         ).pack(anchor="w", padx=8, pady=(6, 0))
 
-        self.lst_templates = TagList(tpl_frame, color=BLUE, height=150)
+        self.lst_templates = TagList(tpl_frame, color=BLUE, height=150, on_change=self._mark_dirty)
         self.lst_templates.pack(fill="both", expand=True)
         self.lst_templates.set(DEFAULT_TEMPLATES)
 
@@ -570,8 +582,15 @@ class App(tk.Tk):
         self.out_path.pack(side="left", ipady=4, padx=8)
         self._btn(row, "📂", self._pick_out, BORDER).pack(side="left")
 
-        self.btn_generate = self._btn(parent, "⚡ СГЕНЕРИРОВАТЬ СЛОВАРЬ", self._generate, ACCENT, big=True)
-        self.btn_generate.pack(pady=10)
+        gen_btn_row = tk.Frame(parent, bg=BG)
+        gen_btn_row.pack(pady=10)
+
+        self.btn_generate = self._btn(gen_btn_row, "⚡ СГЕНЕРИРОВАТЬ СЛОВАРЬ", self._generate, ACCENT, big=True)
+        self.btn_generate.pack(side="left")
+
+        self.btn_stop_gen = self._btn(gen_btn_row, "⏹ СТОП", self._stop_generation, RED, big=True)
+        self.btn_stop_gen.pack(side="left", padx=10)
+        self.btn_stop_gen.config(state="disabled")
 
         self.gen_log = scrolledtext.ScrolledText(
             parent,
@@ -1382,9 +1401,13 @@ python .\\wallet_recovery_gui_final.py
             json.dump(data, f, ensure_ascii=False, indent=2)
         tmp_file.replace(DATA_FILE)
 
+    def _mark_dirty(self):
+        self._data_dirty = True
+
     def _save_data(self):
         try:
             self._save_data_to_disk()
+            self._data_dirty = False
             messagebox.showinfo("Сохранено", f"Данные сохранены:\n{DATA_FILE}")
         except Exception as exc:
             messagebox.showerror("Ошибка сохранения", f"Не удалось сохранить настройки:\n\n{exc}")
@@ -1396,10 +1419,13 @@ python .\\wallet_recovery_gui_final.py
             print(f"Ошибка автосохранения {DATA_FILE}: {exc}")
 
     def _start_autosave(self):
+        self._data_dirty = True
         self._autosave_tick()
 
     def _autosave_tick(self):
-        self._save_data_silent()
+        if self._data_dirty:
+            self._save_data_silent()
+            self._data_dirty = False
         self._autosave_job = self.after(15000, self._autosave_tick)
 
     def _on_close(self):
@@ -1409,7 +1435,8 @@ python .\\wallet_recovery_gui_final.py
             except Exception:
                 pass
             self._autosave_job = None
-        self._save_data_silent()
+        if self._data_dirty:
+            self._save_data_silent()
         self.destroy()
 
     def _load_data(self):
@@ -1482,6 +1509,7 @@ python .\\wallet_recovery_gui_final.py
             self.lst_phrases.set([])
             self.lst_numbers.set([])
             self.lst_specials.set([])
+            self._mark_dirty()
 
     # ── Логи ──────────────────────────────────────────────────────────────────
     def _log_text(self, widget, msg, tag=None):
@@ -1639,6 +1667,7 @@ python .\\wallet_recovery_gui_final.py
     # ── Генерация словаря ─────────────────────────────────────────────────────
     def _reset_templates(self):
         self.lst_templates.set(DEFAULT_TEMPLATES)
+        self._mark_dirty()
 
     def _expand_word_like(self, raw_items, is_phrase=False):
         result = []
@@ -1763,6 +1792,11 @@ python .\\wallet_recovery_gui_final.py
         text += ["", f"Итого до удаления дублей: {total:,}"]
         messagebox.showinfo("Оценка словаря", "\n".join(text))
 
+    def _stop_generation(self):
+        self._stop_generation_flag = True
+        self._log_gen("⏹ Остановка генерации...")
+        self.btn_stop_gen.config(state="disabled")
+
     def _generate(self):
         if self._generating:
             return
@@ -1797,7 +1831,9 @@ python .\\wallet_recovery_gui_final.py
 
         out = self.out_path.get().strip() or "passwords.txt"
         self.btn_generate.config(state="disabled")
+        self.btn_stop_gen.config(state="normal")
         self._generating = True
+        self._stop_generation_flag = False
         threading.Thread(target=self._generate_worker, args=(pools, templates, out, total), daemon=True).start()
 
     def _template_to_ordered_tokens(self, template):
@@ -1831,6 +1867,8 @@ python .\\wallet_recovery_gui_final.py
 
         seen = set()
         count = 0
+        batch_size = 50000
+        last_logged_count = 0
 
         try:
             with open(out, "w", encoding="utf-8", newline="\n") as fout:
@@ -1839,36 +1877,46 @@ python .\\wallet_recovery_gui_final.py
                     if not ordered:
                         continue
 
+                    markers = [m for m, _ in ordered]
+                    value_lists = [pools[token] for _, token in ordered]
+
+                    if any(len(vl) == 0 for vl in value_lists):
+                        log(f"Шаблон: {tpl} — пропущен (нет значений)")
+                        continue
+
                     log(f"Шаблон: {tpl}")
 
-                    def walk(i, chosen):
-                        nonlocal count
+                    if self._stop_generation_flag:
+                        log("  (пропущен: остановка пользователем)")
+                        break
 
-                        if i >= len(ordered):
-                            pwd = tmp_tpl
-                            for marker, value in chosen.items():
-                                pwd = pwd.replace(marker, value)
+                    buffer = []
+                    for combination in itertools.product(*value_lists):
+                        if self._stop_generation_flag:
+                            break
+                        pwd = tmp_tpl
+                        for marker, value in zip(markers, combination):
+                            pwd = pwd.replace(marker, value)
 
-                            if pwd and pwd not in seen:
-                                seen.add(pwd)
-                                fout.write(pwd + "\n")
-                                count += 1
+                        if not pwd:
+                            continue
 
-                                if count % PROGRESS_EVERY == 0:
+                        if pwd not in seen:
+                            seen.add(pwd)
+                            buffer.append(pwd + "\n")
+                            count += 1
+
+                            if len(buffer) >= batch_size:
+                                fout.writelines(buffer)
+                                buffer = []
+                                if count - last_logged_count >= PROGRESS_EVERY:
                                     log(f"Записано: {count:,}")
-                            return
+                                    last_logged_count = count
 
-                        marker, token = ordered[i]
-                        values = pools[token]
-                        if not values:
-                            return
-
-                        for value in values:
-                            chosen[marker] = value
-                            walk(i + 1, chosen)
-                            chosen.pop(marker, None)
-
-                    walk(0, {})
+                    if buffer:
+                        fout.writelines(buffer)
+                        if count - last_logged_count >= PROGRESS_EVERY or last_logged_count == 0:
+                            log(f"Записано: {count:,}")
 
             log("")
             log(f"✓ Готово. Уникальных паролей: {count:,}")
@@ -1878,7 +1926,9 @@ python .\\wallet_recovery_gui_final.py
             log(f"✗ Ошибка генерации: {exc}")
         finally:
             self._generating = False
+            self._stop_generation_flag = False
             self.after(0, lambda: self.btn_generate.config(state="normal"))
+            self.after(0, lambda: self.btn_stop_gen.config(state="disabled"))
 
     # ── Мониторинг запуска btcrecover ─────────────────────────────────────────
     def _format_duration(self, seconds):
@@ -1889,6 +1939,21 @@ python .\\wallet_recovery_gui_final.py
         return f"{hours:02d}:{minutes:02d}:{sec:02d}"
 
     def _count_file_lines(self, path):
+        """Быстрый подсчёт строк в файле. Сначала пробует wc -l, fallback на чтение блоками."""
+        try:
+            result = subprocess.run(
+                ["wc", "-l", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode == 0 and result.stdout:
+                count = int(result.stdout.strip().split()[0])
+                return count
+        except Exception:
+            pass
+
         count = 0
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1024 * 1024), b""):
@@ -2187,27 +2252,12 @@ python .\\wallet_recovery_gui_final.py
             self.after(0, self._log_run, line, tag)
 
         if self.proc.stdout:
-            buffer = ""
-            while True:
+            for line in iter(self.proc.stdout.readline, ""):
                 if self._stop_requested:
                     break
-
-                ch = self.proc.stdout.read(1)
-                if ch == "" and self.proc.poll() is not None:
+                if not line:
                     break
-                if ch == "":
-                    continue
-
-                if ch in ("\n", "\r"):
-                    if buffer:
-                        handle_output(buffer)
-                        buffer = ""
-                    continue
-
-                buffer += ch
-
-            if buffer:
-                handle_output(buffer)
+                handle_output(line)
 
         if self._stop_requested and self.proc and self.proc.poll() is None:
             try:
@@ -2554,42 +2604,63 @@ python .\\wallet_recovery_gui_final.py
 
         return json.loads(data)
 
+    def _check_single_address(self, api_base, address):
+        """Проверить один адрес. Возвращает (address, result_dict, error)."""
+        try:
+            info = self._fetch_address_info(api_base, address)
+            chain = info.get("chain_stats", {})
+            mempool = info.get("mempool_stats", {})
+
+            confirmed = int(chain.get("funded_txo_sum", 0)) - int(chain.get("spent_txo_sum", 0))
+            unconfirmed = int(mempool.get("funded_txo_sum", 0)) - int(mempool.get("spent_txo_sum", 0))
+            tx_count = int(chain.get("tx_count", 0)) + int(mempool.get("tx_count", 0))
+
+            return (address, {"confirmed": confirmed, "unconfirmed": unconfirmed, "tx_count": tx_count}, None)
+        except Exception as exc:
+            return (address, None, str(exc))
+
     def _check_balances_worker(self, api_base, addresses):
         total_confirmed = 0
         total_mempool = 0
         ok_count = 0
+        errors = []
 
         try:
             self.after(0, self._log_balance, f"API: {api_base}", "info")
-            self.after(0, self._log_balance, f"Адресов: {len(addresses)}", "info")
+            self.after(0, self._log_balance, f"Адресов: {len(addresses)}, параллельно до 10 запросов", "info")
             self.after(0, self._log_balance, "─" * 70)
 
-            for idx, address in enumerate(addresses, start=1):
-                try:
-                    info = self._fetch_address_info(api_base, address)
-                    chain = info.get("chain_stats", {})
-                    mempool = info.get("mempool_stats", {})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                fut_to_addr = {
+                    executor.submit(self._check_single_address, api_base, addr): addr
+                    for addr in addresses
+                }
 
-                    confirmed = int(chain.get("funded_txo_sum", 0)) - int(chain.get("spent_txo_sum", 0))
-                    unconfirmed = int(mempool.get("funded_txo_sum", 0)) - int(mempool.get("spent_txo_sum", 0))
-                    tx_count = int(chain.get("tx_count", 0)) + int(mempool.get("tx_count", 0))
+                for idx, future in enumerate(concurrent.futures.as_completed(fut_to_addr), start=1):
+                    address, result, error = future.result()
 
-                    total_confirmed += confirmed
-                    total_mempool += unconfirmed
-                    ok_count += 1
+                    if error:
+                        errors.append((address, error))
+                        self.after(0, self._log_balance, f"{idx}/{len(addresses)} {address} | ошибка: {error}", "err")
+                    else:
+                        confirmed = result["confirmed"]
+                        unconfirmed = result["unconfirmed"]
+                        tx_count = result["tx_count"]
 
-                    confirmed_btc = confirmed / 100_000_000
-                    unconfirmed_btc = unconfirmed / 100_000_000
-                    tag = "ok" if confirmed or unconfirmed else None
+                        total_confirmed += confirmed
+                        total_mempool += unconfirmed
+                        ok_count += 1
 
-                    self.after(
-                        0,
-                        self._log_balance,
-                        f"{idx}/{len(addresses)} {address} | confirmed: {confirmed_btc:.8f} BTC | mempool: {unconfirmed_btc:.8f} BTC | tx: {tx_count}",
-                        tag,
-                    )
-                except Exception as exc:
-                    self.after(0, self._log_balance, f"{idx}/{len(addresses)} {address} | ошибка: {exc}", "err")
+                        confirmed_btc = confirmed / 100_000_000
+                        unconfirmed_btc = unconfirmed / 100_000_000
+                        tag = "ok" if confirmed or unconfirmed else None
+
+                        self.after(
+                            0,
+                            self._log_balance,
+                            f"{idx}/{len(addresses)} {address} | confirmed: {confirmed_btc:.8f} BTC | mempool: {unconfirmed_btc:.8f} BTC | tx: {tx_count}",
+                            tag,
+                        )
 
             total_btc = total_confirmed / 100_000_000
             mempool_btc = total_mempool / 100_000_000
